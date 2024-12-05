@@ -14,12 +14,30 @@ type Config struct {
 }
 
 type Target struct {
-	Alarm     bool // Alarm state
-	Angle     int  // Angle of the target relative to the perpendicular direction of the antenna
-	Distance  int  // Distance in meters to the target
-	Direction int  // Direction of movement relative to the antenna
-	Speed     int  // Speed in KM/H
-	SNR       int  // Signal to Noise Ratio
+	Alarm     bool      // Alarm state
+	Angle     int       // Angle of the target relative to the perpendicular direction of the antenna
+	Distance  int       // Distance in meters to the target
+	Direction Direction // Direction of movement relative to the antenna
+	Speed     int       // Speed in KM/H
+	SNR       int       // Signal to Noise Ratio
+}
+
+const (
+	DirectionAway   Direction = 0
+	DirectionToward Direction = 1
+)
+
+type Direction int
+
+func (d Direction) String() string {
+	switch d {
+	case DirectionAway:
+		return "Away"
+	case DirectionToward:
+		return "Toward"
+	default:
+		return "Unknown"
+	}
 }
 
 type LD2451 struct {
@@ -64,14 +82,26 @@ func (ld2451 *LD2451) Close() {
 
 func (ld2451 *LD2451) read() {
 	for {
-		buf := make([]byte, 4)
+		buf := make([]byte, 1)
 		_, err := ld2451.port.Read(buf)
 		if err != nil {
 			ld2451.errors <- err
 			return
 		}
 
-		if bytes.Equal(buf, frameheader) {
+		if buf[0] != 0xf4 {
+			continue
+		}
+
+		//check if the next 3 bytes are the frame header
+		buf = make([]byte, 3)
+		_, err = ld2451.port.Read(buf)
+		if err != nil {
+			ld2451.errors <- err
+			return
+		}
+
+		if bytes.Equal(buf, frameheader[1:]) {
 			//get length of the frame (next 2 bytes)
 			buf = make([]byte, 2)
 			_, err := ld2451.port.Read(buf)
@@ -109,7 +139,7 @@ func (ld2451 *LD2451) read() {
 				target.Alarm = int(buf[0]) == 1
 				target.Angle = int(buf[1]) - 0x80
 				target.Distance = int(buf[2])
-				target.Direction = int(buf[3])
+				target.Direction = Direction(buf[3])
 				target.Speed = int(buf[4])
 				target.SNR = int(buf[5])
 
@@ -118,6 +148,8 @@ func (ld2451 *LD2451) read() {
 				//move to the next target
 				buf = buf[6:]
 			}
+			//flush the rest of the frame
+			ld2451.port.Flush()
 		}
 	}
 }
