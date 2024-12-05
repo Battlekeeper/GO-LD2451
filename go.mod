@@ -1,4 +1,4 @@
-module github.com/Battlekeeper/GO-LD2451
+module github.com/Battlekeeper/LD2451
 
 go 1.23.1
 
