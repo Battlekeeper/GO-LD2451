@@ -2,6 +2,7 @@ package LD2451
 
 import (
 	"bytes"
+	"fmt"
 	"time"
 
 	"github.com/tarm/serial"
@@ -14,7 +15,6 @@ type Config struct {
 }
 
 type Target struct {
-	Alarm     bool      // Alarm state
 	Angle     int       // Angle of the target relative to the perpendicular direction of the antenna
 	Distance  int       // Distance in meters to the target
 	Direction Direction // Direction of movement relative to the antenna
@@ -53,10 +53,10 @@ var (
 
 func Open(config Config) (*LD2451, error) {
 	serialConfig := &serial.Config{
-		Name:        config.SerialPort, // Replace with your COM port
-		Baud:        config.BaudRate,   // Set the baud rate (default is 9600 for CH340)
-		ReadTimeout: time.Second * 2,   // Optional: Set a read timeout
-		Parity:      serial.ParityNone, // Optional: Set the parity mode
+		Name:        config.SerialPort,
+		Baud:        config.BaudRate,
+		ReadTimeout: time.Second * 2,
+		Parity:      serial.ParityNone,
 	}
 
 	port, err := serial.OpenPort(serialConfig)
@@ -70,6 +70,8 @@ func Open(config Config) (*LD2451, error) {
 		errors:  make(chan error),
 		port:    port,
 	}
+
+	ld2451.syn()
 
 	go ld2451.read()
 
@@ -89,7 +91,7 @@ func (ld2451 *LD2451) read() {
 			return
 		}
 
-		if buf[0] != 0xf4 {
+		if buf[0] != frameheader[0] {
 			continue
 		}
 
@@ -130,13 +132,13 @@ func (ld2451 *LD2451) read() {
 			}
 			//get the number of targets in the frame, this is the next byte after the frame length
 			numTargets := int(buf[0])
-			//move to the next byte
-			buf = buf[1:]
+			//move to the next byte AND skip alarm state
+			buf = buf[2:]
+
 			//loop over and parse each target
 			for i := 0; i < numTargets; i++ {
 				target := Target{}
 				//get the target data
-				target.Alarm = int(buf[0]) == 1
 				target.Angle = int(buf[1]) - 0x80
 				target.Distance = int(buf[2])
 				target.Direction = Direction(buf[3])
@@ -149,7 +151,12 @@ func (ld2451 *LD2451) read() {
 				buf = buf[6:]
 			}
 			//flush the rest of the frame
-			ld2451.port.Flush()
+			buf = make([]byte, 4)
+			_, err = ld2451.port.Read(buf)
+			if err != nil {
+				ld2451.errors <- err
+				return
+			}
 		}
 	}
 }
@@ -160,5 +167,66 @@ func (ld2451 *LD2451) ReadTarget() (Target, error) {
 		return target, nil
 	case err := <-ld2451.errors:
 		return Target{}, err
+	}
+}
+
+func (ld2451 *LD2451) sendCommand(command []byte) {
+	//send bytes FD FC FB FA 04 00 FF 00 01 00 04 03 02 01
+	ld2451.port.Write([]byte{0xfd, 0xfc, 0xfb, 0xfa, 0x04, 0x00, 0xff, 0x00, 0x01, 0x00, 0x04, 0x03, 0x02, 0x01})
+	//read the response
+	buf := make([]byte, 1)
+	_, err := ld2451.port.Read(buf)
+	if err != nil {
+		ld2451.errors <- err
+		return
+	}
+	if buf[0] != 0xfd {
+		ld2451.errors <- fmt.Errorf("failed to send command to the LD2451")
+		return
+	}
+
+	buf = make([]byte, 17)
+	_, err = ld2451.port.Read(buf)
+	if err != nil {
+		ld2451.errors <- err
+		return
+	}
+	status := buf[7:]
+	status = status[:len(status)-8]
+	endFrame := buf[len(buf)-4:]
+
+	if !bytes.Equal(endFrame, []byte{0x04, 0x03, 0x02, 0x01}) || !bytes.Equal(status, []byte{00, 00}) {
+		ld2451.errors <- fmt.Errorf("failed to send command to the LD2451")
+		return
+	}
+
+	//send command
+
+	ld2451.port.Write([]byte{0xfd, 0xfc, 0xfb, 0xfa, 0x02, 0x00, 0xfe, 0x00, 0x04, 0x03, 0x02, 0x01})
+
+	buf = make([]byte, 1)
+	_, err = ld2451.port.Read(buf)
+	if err != nil {
+		ld2451.errors <- err
+		return
+	}
+	if buf[0] != 0xfd {
+		ld2451.errors <- fmt.Errorf("failed to send command to the LD2451")
+		return
+	}
+
+	buf = make([]byte, 13)
+	_, err = ld2451.port.Read(buf)
+	if err != nil {
+		ld2451.errors <- err
+		return
+	}
+	status = buf[7:]
+	status = status[:len(status)-4]
+	endFrame = buf[len(buf)-4:]
+
+	if !bytes.Equal(endFrame, []byte{0x04, 0x03, 0x02, 0x01}) || !bytes.Equal(status, []byte{00, 00}) {
+		ld2451.errors <- fmt.Errorf("failed to send command to the LD2451")
+		return
 	}
 }
